@@ -12,6 +12,13 @@ from bs4 import BeautifulSoup
 import time
 import os
 import hashlib
+import logging
+
+# ============================================================
+# Logging (works with Gunicorn)
+# ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -62,7 +69,7 @@ def init_cnic_session():
         if meta and meta.get("content"):
             csrf_token = meta["content"]
             session_initialized = True
-            print("✅ CNIC session ready")
+            logger.info("✅ CNIC session ready")
             return True
         hidden = soup.find("input", {"name": "csrf_token"})
         if hidden and hidden.get("value"):
@@ -71,7 +78,7 @@ def init_cnic_session():
             return True
         return False
     except Exception as e:
-        print(f"❌ Session init failed: {e}")
+        logger.error(f"❌ Session init failed: {e}")
         return False
 
 def refresh_csrf():
@@ -125,7 +132,6 @@ def lookup():
     if not data:
         return jsonify({"Error": "Missing data"}), 400
 
-    # Device fingerprint sent from browser JS
     device_fp = data.get("deviceFingerprint", "").strip()
     number     = str(data.get("number", "")).strip()
     ip         = request.headers.get("X-Forwarded-For", request.remote_addr or "")
@@ -134,14 +140,13 @@ def lookup():
     if not device_fp:
         return jsonify({"Error": "Missing device fingerprint"}), 400
 
-    # Combine device fingerprint with UA header for extra confidence
     ua = request.headers.get("User-Agent", "")
     combined = hashlib.sha256(f"{device_fp}|{ua}".encode()).hexdigest()[:32]
 
     allowed, remaining, reset_mins = check_rate_limit(combined)
 
     if not allowed:
-        print(f"🚫 Blocked: {ip} fp={combined[:8]}...")
+        logger.info(f"🚫 Blocked: {ip} fp={combined[:8]}...")
         return jsonify({
             "Error": f"Rate limit reached ({MAX_PER_HOUR}/hour). Try again in {reset_mins} min.",
             "rate_limited": True,
@@ -155,7 +160,7 @@ def lookup():
         if not init_cnic_session():
             return jsonify({"Error": "Database unavailable. Try later."}), 503
 
-    print(f"🔍 {number} | IP: {ip} | FP: {combined[:8]}... | Left: {remaining}")
+    logger.info(f"🔍 {number} | IP: {ip} | FP: {combined[:8]}... | Left: {remaining}")
     result = do_lookup(number)
     result["_remaining"] = remaining
     result["_limit"] = MAX_PER_HOUR
@@ -198,11 +203,20 @@ def admin_limits():
     }
     return jsonify({"active_users": active, "limit": MAX_PER_HOUR})
 
+# ============================================================
+# WSGI entry point (used by Gunicorn on Render)
+# ============================================================
+# Gunicorn calls this module and looks for `app`.
+# Session is initialized here so it runs once at startup.
+init_cnic_session()
+
+# ============================================================
+# Local dev entry point
+# ============================================================
 if __name__ == "__main__":
     print("=" * 50)
     print("  CNIC Lookup — Device Fingerprint Rate Limiting")
     print("=" * 50)
-    init_cnic_session()
     port = int(os.environ.get("PORT", 5000))
     admin_key = os.environ.get("ADMIN_KEY", "changeme")
     print(f"\n🌐 Running at http://0.0.0.0:{port}")
